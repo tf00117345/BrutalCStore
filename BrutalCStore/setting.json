@@ -1,0 +1,8 @@
+{
+  "ip": "127.0.0.1",
+  "port": 104,
+  "calledAE": "SCP104",
+  "callingAE": "SCU1",
+  "countOfDcm": 10,
+  "interval": 5
+}
