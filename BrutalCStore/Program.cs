@@ -65,8 +65,8 @@ void CreateDicomFromBitmap(int idx)
         g.DrawString(text, font, Brushes.Red, new PointF(textX, textY)); // 在Bitmap上畫出置中的文字
     }
 
-    //將Bitmap轉換為Byte數組
-    var imageData = new byte[width * height];
+    //將Bitmap轉換為RGB Byte數組
+    var imageData = new byte[width * height * 3]; // RGB需要3個bytes per pixel
     var imageDataIndex = 0;
 
     for (var y = 0; y < height; y++)
@@ -74,35 +74,49 @@ void CreateDicomFromBitmap(int idx)
         for (var x = 0; x < width; x++)
         {
             var color = bitmap.GetPixel(x, y);
-            //此處使用簡單的灰度轉換，實際情況下可能需要更複雜的轉換
-            var grayscale = (byte)(0.3 * color.R + 0.59 * color.G + 0.11 * color.B);
-            imageData[imageDataIndex++] = grayscale;
+            // RGB格式：按順序儲存R, G, B三個channel
+            imageData[imageDataIndex++] = color.R;
+            imageData[imageDataIndex++] = color.G;
+            imageData[imageDataIndex++] = color.B;
         }
     }
 
     //創建DICOM圖像並將Byte數組添加為圖像像素
     var dicomImage = new DicomDataset
     {
-        { DicomTag.PhotometricInterpretation, PhotometricInterpretation.Monochrome2.Value },
+        // Image Pixel Module - Required for Cornerstone.js
+        { DicomTag.PhotometricInterpretation, "RGB" }, // 直接使用字串確保正確
         { DicomTag.Rows, (ushort)height },
         { DicomTag.Columns, (ushort)width },
         { DicomTag.BitsAllocated, (ushort)8 },
         { DicomTag.BitsStored, (ushort)8 },
         { DicomTag.HighBit, (ushort)7 },
         { DicomTag.PixelRepresentation, (ushort)0 },
-        { DicomTag.PixelData, imageData },
-        //為DICOM圖像添加必要的元數據
-        { DicomTag.PatientID, "P" },
-        { DicomTag.PatientName, "Test^Patient" },
-        { DicomTag.StudyID, "1" },
-        { DicomTag.SeriesNumber, "1" },
+        { DicomTag.SamplesPerPixel, (ushort)3 }, // RGB需要3個samples per pixel
+        { DicomTag.PlanarConfiguration, (ushort)0 }, // 0 = 交錯格式 RGBRGBRGB...
+        
+        // SOP Common Module - Required
+        { DicomTag.SOPClassUID, DicomUID.SecondaryCaptureImageStorage },
         { DicomTag.SOPInstanceUID, DicomUID.Generate().UID },
-        { DicomTag.InstanceNumber, idx.ToString() },
-        { DicomTag.SOPClassUID, DicomUID.SecondaryCaptureImageStorage }
+        
+        // General Image Module - Required  
+        { DicomTag.InstanceNumber, "1" },
+        { DicomTag.ImageType, "DERIVED\\SECONDARY" },
+        
+        // SC Equipment Module - Required for Secondary Capture
+        { DicomTag.ConversionType, "WSD" }, // Workstation
+        { DicomTag.SecondaryCaptureDeviceManufacturer, "BrutalCStore" },
+        { DicomTag.SecondaryCaptureDeviceManufacturerModelName, "Test Generator" },
+        { DicomTag.SecondaryCaptureDeviceSoftwareVersions, "1.0" },
+        
+        // Transfer Syntax - Explicit VR Little Endian (uncompressed)
+        { DicomTag.PixelData, imageData },
     };
 
     //儲存DICOM文件
     var dicomFile = new DicomFile(dicomImage);
+    // 確保使用未壓縮的傳輸語法，這對網頁顯示很重要
+    dicomFile.FileMetaInfo.TransferSyntax = DicomTransferSyntax.ExplicitVRLittleEndian;
     dicomFile.Save(Path.Combine(tmpDirectory, fileName));
 }
 
@@ -110,7 +124,7 @@ string GetDicom(string studyInstanceUid, string seriesInstanceUid, int interval,
 {
     var fileName = $"{idx}.dcm";
     var filePath = Path.Combine(tmpDirectory, fileName);
-    if (!File.Exists(fileName)) CreateDicomFromBitmap(idx);
+    if (!File.Exists(filePath)) CreateDicomFromBitmap(idx);
 
     //創建DICOM圖像並將Byte數組添加為圖像像素
     var dicomFile = DicomFile.Open(filePath);
@@ -135,25 +149,40 @@ string GetDicom(string studyInstanceUid, string seriesInstanceUid, int interval,
     dicomFile.Dataset.AddOrUpdate(DicomTag.SOPInstanceUID, sopInstanceUid);
     dicomFile.Dataset.AddOrUpdate(DicomTag.InstanceNumber, idx.ToString());
     dicomFile.Dataset.AddOrUpdate(DicomTag.SOPClassUID, DicomUID.SecondaryCaptureImageStorage);
+    
+    // 確保 RGB 設定不被其他更新覆蓋
+    dicomFile.Dataset.AddOrUpdate(DicomTag.PhotometricInterpretation, "RGB");
+    dicomFile.Dataset.AddOrUpdate(DicomTag.SamplesPerPixel, (ushort)3);
+    dicomFile.Dataset.AddOrUpdate(DicomTag.PlanarConfiguration, (ushort)0);
 
     foreach (var dcnDcmTagPair in dcmTagPairList)
     {
         ushort group = Convert.ToUInt16(dcnDcmTagPair.Group, 16);
         ushort element = Convert.ToUInt16(dcnDcmTagPair.Element, 16);
-        dicomFile.Dataset.AddOrUpdate(new DicomTag(group, element), dcnDcmTagPair.Value);
     }
-
+    
+    // 最後再次確保 RGB 設定正確
+    dicomFile.Dataset.AddOrUpdate(DicomTag.PhotometricInterpretation, "RGB");
+    dicomFile.Dataset.AddOrUpdate(DicomTag.SamplesPerPixel, (ushort)3);
+    dicomFile.Dataset.AddOrUpdate(DicomTag.PlanarConfiguration, (ushort)0);
+    
     //儲存DICOM文件
     fileName = $"{sopInstanceUid}.dcm";
+    // 確保最終檔案也使用未壓縮的傳輸語法
+    dicomFile.FileMetaInfo.TransferSyntax = DicomTransferSyntax.ExplicitVRLittleEndian;
     dicomFile.Save(Path.Combine(dcmDirectory, fileName));
     return Path.Combine(dcmDirectory, fileName);
 }
 
 
-void SendDcm(string ip, int port, string callingAe, string calledAe, ConcurrentBag<string> dcmList)
+async Task SendDcm(string ip, int port, string callingAe, string calledAe, ConcurrentBag<string> dcmList)
 {
     var client = new DicomClient(ip, port, false, callingAe, calledAe);
     client.NegotiateAsyncOps();
+
+    var completedCount = 0;
+    var totalCount = dcmList.Count;
+    var allCompleted = new TaskCompletionSource<bool>();
 
     foreach (var dcmPath in dcmList)
     {
@@ -164,6 +193,14 @@ void SendDcm(string ip, int port, string callingAe, string calledAe, ConcurrentB
             {
                 Console.WriteLine($"{dcmPath}, C-Store Response Received, Status:{response.Status}");
                 File.Delete(dcmPath);
+                
+                // 計數完成的傳輸
+                var completed = Interlocked.Increment(ref completedCount);
+                if (completed == totalCount)
+                {
+                    Console.WriteLine($"所有 {totalCount} 個檔案傳輸完成");
+                    allCompleted.SetResult(true);
+                }
             };
 
             client.AddRequestAsync(request);
@@ -176,10 +213,21 @@ void SendDcm(string ip, int port, string callingAe, string calledAe, ConcurrentB
             Console.WriteLine(exception.ToString());
             Console.WriteLine("----------------------------------------------------");
             Console.WriteLine();
+            
+            // 錯誤也算完成一個
+            var completed = Interlocked.Increment(ref completedCount);
+            if (completed == totalCount)
+            {
+                allCompleted.SetResult(true);
+            }
         }
     }
 
-    client.SendAsync();
+    // 開始傳輸
+    await client.SendAsync();
+    
+    // 等待所有回應完成
+    await allCompleted.Task;
 }
 
 InitialEnvironment();
@@ -201,7 +249,7 @@ Console.WriteLine("***************************************************");
 
 for (var i = 1; i <= storeConfig.Interval; i++)
 {
-    Console.WriteLine("Interval: " + i);
+    Console.WriteLine($"開始 Interval: {i}");
 
     var studyInstanceUid = DicomUID.Generate().UID;
     var seriesInstanceUid = $"{studyInstanceUid}.1";
@@ -211,10 +259,9 @@ for (var i = 1; i <= storeConfig.Interval; i++)
     Parallel.For(1, storeConfig.CountOfDcm + 1,
         j => { dcmList.Add(GetDicom(studyInstanceUid, seriesInstanceUid, i, j, datetime)); });
 
-    Console.WriteLine(dcmList.Count);
-    SendDcm(storeConfig.IP, storeConfig.Port, storeConfig.CallingAe, storeConfig.CalledAe, dcmList);
+    Console.WriteLine($"產生 {dcmList.Count} 個檔案，開始傳輸...");
+    SendDcm(storeConfig.IP, storeConfig.Port, storeConfig.CallingAe, storeConfig.CalledAe, dcmList).Wait();
+    Console.WriteLine($"Interval {i} 完成");
 }
 
-Console.WriteLine("Finish");
-Console.ReadLine();
-Console.Read();
+Console.WriteLine("所有傳輸完成!");
